@@ -4,14 +4,14 @@ import zipfile
 import shutil
 import tempfile
 import nbtlib
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 
 def parse_mcstructure(file_path: str) -> Optional[Dict]:
-    """Безопасный парсинг .mcstructure с фиксом ошибок nbtlib (size, TagList)"""
+    """Безопасный парсинг .mcstructure с защитой от ошибок nbtlib (TagString, size)"""
     try:
         data = nbtlib.load(file_path)
         
-        # 1. Обработка size (защита от ошибки 'size' на Linux)
+        # 1. Обработка размера (size)
         size_data = data.get("size", [0, 0, 0])
         if isinstance(size_data, list):
             x = size_data[0] if len(size_data) > 0 else 0
@@ -22,13 +22,14 @@ def parse_mcstructure(file_path: str) -> Optional[Dict]:
             y = size_data.get("y", 0)
             z = size_data.get("z", 0)
 
-        # 2. Обработка палитры и блоков (фикс nbtlib TagList)
+        # 2. Обработка палитры (фикс nbtlib TagList)
         raw_palette = data.get("palette", [])
         if hasattr(raw_palette, "value"):
             palette = raw_palette.value
         else:
             palette = raw_palette
 
+        # 3. Обработка блоков (фикс nbtlib TagList)
         raw_blocks = data.get("blocks", [])
         if hasattr(raw_blocks, "value"):
             blocks = raw_blocks.value
@@ -45,8 +46,11 @@ def parse_mcstructure(file_path: str) -> Optional[Dict]:
         print(f"❌ Ошибка парсинга .mcstructure: {e}")
         return None
 
-def generate_mcaddon(structure_data: Dict) -> Optional[str]:
-    """Генерирует .mcaddon с послойными функциями под Armor Stand"""
+def generate_mcpack(structure_data: Dict) -> Optional[str]:
+    """
+    Генерирует .mcpack (Behavior Pack) с послойными функциями под Armor Stand.
+    Возвращает путь к файлу или None, если структура пуста.
+    """
     if not structure_data:
         return None
 
@@ -59,7 +63,7 @@ def generate_mcaddon(structure_data: Dict) -> Optional[str]:
     func_dir = os.path.join(pack_dir, "functions", "hologram")
     os.makedirs(func_dir, exist_ok=True)
 
-    # 1. Создаем манифест (manifest.json) для Behavior Pack
+    # 1. Создаем manifest.json для Behavior Pack
     manifest = {
         "format_version": 2,
         "header": {
@@ -75,53 +79,63 @@ def generate_mcaddon(structure_data: Dict) -> Optional[str]:
             "version": [1, 0, 0]
         }]
     }
-    
     with open(os.path.join(pack_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
-    # 2. Сортировка блоков по слоям (Ось Y) для послойной загрузки
+    # 2. Сортировка блоков по слоям (Ось Y)
     layers = {}
     for block in blocks:
-        # В .mcstructure блок обычно массив: [x, y, z, palette_index]
         if isinstance(block, list) and len(block) >= 4:
-            pos_x, pos_y, pos_z, palette_idx = block[0], block[1], block[2], block[3]
+            pos_x = int(block[0])
+            pos_y = int(block[1])
+            pos_z = int(block[2])
+            palette_idx = int(block[3])
             
-            # Получаем название блока из палитры и убираем префикс minecraft: для читаемости
-            block_name = palette[palette_idx].get("name", "minecraft:air")
+            # Пропускаем битые индексы палитры
+            if palette_idx >= len(palette):
+                continue
+
+            # Получаем имя блока и безопасно конвертируем в строку
+            block_data = palette[palette_idx]
+            block_name = block_data.get("name", "minecraft:air")
+            
+            # ВАЖНЫЙ ФИКС: nbtlib возвращает TagString, преобразуем в обычный str
+            if hasattr(block_name, "value"):
+                block_name = block_name.value
+            elif not isinstance(block_name, str):
+                block_name = str(block_name)
+
+            # Пропускаем воздух
             if block_name == "minecraft:air":
                 continue
 
-            # Группируем по высоте Y
+            # Группируем по координате Y
             if pos_y not in layers:
                 layers[pos_y] = []
-            
-            # Запоминаем команду для этого блока (относительно точки спавна стойки)
             layers[pos_y].append(f"setblock ~{pos_x} ~{pos_y} ~{pos_z} {block_name}")
 
+    # Если в здании совсем нет блоков (только воздух), возвращаем None
     if not layers:
+        print("❌ Структура не содержит блоков (пустой .mcstructure)")
         return None
 
     # 3. Генерируем функции для каждого слоя (Y)
     for y, commands in layers.items():
         layer_file = os.path.join(func_dir, f"layer_{y}.mcfunction")
         with open(layer_file, "w") as f:
-            f.write(f"# Блоки слоя Y={y}\n")
             for cmd in commands:
                 f.write(cmd + "\n")
 
-    # 4. Генерируем основную функцию summon.mcfunction (спавн стойки и загрузка 1-го слоя)
-    # Примечание: Поменяв в коде `/function hologram/layer_0` на layer_1, 
-    # вы можете менять отображаемый слой в игре.
-    first_layer = sorted(layers.keys())[0] if layers else 0
+    # 4. Генерируем основную функцию summon.mcfunction
+    first_layer = sorted(layers.keys())[0]
     summon_file = os.path.join(pack_dir, "functions", "summon.mcfunction")
     with open(summon_file, "w") as f:
         f.write(f"summon armor_stand ~ ~ ~ {{Invisible:1b, NoBasePlate:1b, ShowArms:0b, Tags:[\"hologram_stand\"], Pose:{{Body:[0f,0f,0f]}}}}\n")
         f.write(f"execute as @e[type=armor_stand,tag=hologram_stand,limit=1] at @s run function hologram/layer_{first_layer}\n")
-        f.write("### Чтобы сменить слой, выполните в игре:\n")
-        f.write("### /function hologram/layer_1, /function hologram/layer_2 и т.д.\n")
+        f.write("### Используй команды /function hologram/layer_0, /function hologram/layer_1 ... для переключения слоев\n")
 
-    # 5. Упаковываем всё в .mcaddon (архив)
-    output_filename = os.path.join(tempfile.gettempdir(), "hologram.mcaddon")
+    # 5. Упаковываем в .mcpack (вместо .mcaddon!)
+    output_filename = os.path.join(tempfile.gettempdir(), "hologram.mcpack")
     with zipfile.ZipFile(output_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(pack_dir):
             for file in files:
@@ -129,6 +143,6 @@ def generate_mcaddon(structure_data: Dict) -> Optional[str]:
                 rel_path = os.path.relpath(full_path, temp_dir)
                 zipf.write(full_path, rel_path)
 
-    # Удаляем временную папку после упаковки (она останется в кэше Python, пока не перезапустится бот)
+    # Очистка временных файлов
     shutil.rmtree(temp_dir)
     return output_filename
