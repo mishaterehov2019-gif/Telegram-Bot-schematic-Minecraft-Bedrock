@@ -8,15 +8,20 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# Импорт модулей (заменен на as db для устранения ошибки import 'db')
+# Импорт модулей
 import database as db
 import parser as mc_parser
 
 # --- КОНФИГУРАЦИЯ ---
-ADMIN_ID = 123456789       # ЗАМЕНИ НА СВОЙ TELEGRAM ID
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # ЗАМЕНИ НА ТОКЕН БОТА
+# Берем данные из переменных окружения Railway
+ADMIN_ID = int(os.getenv("ADMIN_ID", 123456789))  # Если не задано, использует 123456789
+BOT_TOKEN = os.getenv("BOT_TOKEN")                # Сюда подставится токен из настройки Railway
 
-# --- НАСТРОЙКА ЛОГГИРОВАНИЯ И БОТА ---
+# Проверка, что токен действительно есть перед запуском
+if not BOT_TOKEN:
+    raise ValueError("Ошибка: Переменная BOT_TOKEN не найдена в окружении! Проверьте настройки Railway.")
+
+# ... (дальше идет настройка логгирования и бота) ...
 logging.basicConfig(level=logging.INFO)
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
