@@ -1,148 +1,181 @@
-import os
+# parser.py
+import io
 import json
 import zipfile
-import shutil
-import tempfile
+import uuid
+import struct
+import zlib
 import nbtlib
-from typing import Dict, Optional
 
-def parse_mcstructure(file_path: str) -> Optional[Dict]:
-    """Безопасный парсинг .mcstructure с защитой от ошибок nbtlib (TagString, size)"""
-    try:
-        data = nbtlib.load(file_path)
-        
-        # 1. Обработка размера (size)
-        size_data = data.get("size", [0, 0, 0])
-        if isinstance(size_data, list):
-            x = size_data[0] if len(size_data) > 0 else 0
-            y = size_data[1] if len(size_data) > 1 else 0
-            z = size_data[2] if len(size_data) > 2 else 0
-        else:
-            x = size_data.get("x", 0)
-            y = size_data.get("y", 0)
-            z = size_data.get("z", 0)
+# ---------- Минимальный генератор 1x1 PNG (без Pillow) ----------
+def _create_png_1x1(r: int, g: int, b: int, a: int) -> bytes:
+    """Возвращает байты валидного PNG размером 1x1 пиксель RGBA."""
+    def chunk(chunk_type: bytes, data: bytes) -> bytes:
+        crc = struct.pack('>I', zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
+        return struct.pack('>I', len(data)) + chunk_type + data + crc
 
-        # 2. Обработка палитры (фикс nbtlib TagList)
-        raw_palette = data.get("palette", [])
-        if hasattr(raw_palette, "value"):
-            palette = raw_palette.value
-        else:
-            palette = raw_palette
+    sig = b'\x89PNG\r\n\x1a\n'
+    ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 6, 0, 0, 0)   # 8-bit RGBA
+    ihdr = chunk(b'IHDR', ihdr_data)
+    raw = b'\x00' + struct.pack('BBBB', r, g, b, a)  # filter byte + pixel
+    compressed = zlib.compress(raw)
+    idat = chunk(b'IDAT', compressed)
+    iend = chunk(b'IEND', b'')
+    return sig + ihdr + idat + iend
 
-        # 3. Обработка блоков (фикс nbtlib TagList)
-        raw_blocks = data.get("blocks", [])
-        if hasattr(raw_blocks, "value"):
-            blocks = raw_blocks.value
-        else:
-            blocks = raw_blocks
+HOLOGRAM_RGBA = (0, 255, 255, 128)   # полупрозрачный бирюзовый
+HOLOGRAM_PNG = _create_png_1x1(*HOLOGRAM_RGBA)
+ICON_PNG = _create_png_1x1(0, 255, 255, 128)  # та же иконка
 
-        return {
-            "size": {"x": x, "y": y, "z": z},
-            "palette": palette,
-            "blocks": blocks,
-            "name": data.get("name", "hologram_build")
+# ---------- Генерация .mcpack ----------
+def generate_mcpack(structure_bytes: bytes) -> bytes:
+    """
+    Принимает байты .mcstructure, возвращает байты .mcpack (zip-архива).
+    Генерирует голограмму постройки с послойным отображением через позы Armor Stand.
+    """
+    # 1. Парсинг NBT
+    f = io.BytesIO(structure_bytes)
+    root = nbtlib.load(f)
+    structure = root["structure"]
+    size = list(structure["size"])            # [x, y, z]
+    size_x, size_y, size_z = size
+
+    # Защита от слишком высокой постройки (поз Armor Stand 0-12)
+    max_layer = min(size_y - 1, 12)
+    layer_cap_note = ""
+    if size_y > 13:
+        layer_cap_note = " (постройка выше 13 блоков, отображаются только первые 13 слоёв)"
+
+    # Палитра
+    palette = structure["palette"]["default"]["block_palette"]
+    block_indices = structure["block_indices"]   # [z][y][x]
+
+    # Собираем блоки по слоям Y (игнорируем air)
+    layers = {y: [] for y in range(max_layer + 1)}
+    for z in range(size_z):
+        for y in range(min(size_y, max_layer + 1)):
+            row = block_indices[z][y]
+            for x in range(size_x):
+                idx = row[x]
+                if 0 <= idx < len(palette):
+                    name = str(palette[idx]["name"])
+                else:
+                    name = "minecraft:air"
+                if name != "minecraft:air":
+                    layers[y].append((x, y, z))   # координаты блока
+
+    # Определяем максимальную позу по фактическим слоям
+    max_pose = max_layer   # даже если выше слои пусты, оставим до max_layer
+
+    # Создаём zip в памяти
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # manifest.json
+        header_uuid = str(uuid.uuid4())
+        module_uuid = str(uuid.uuid4())
+        manifest = {
+            "format_version": 2,
+            "header": {
+                "description": "Hologram structure pack",
+                "name": "Structure Hologram",
+                "uuid": header_uuid,
+                "version": [1, 0, 0],
+                "min_engine_version": [1, 16, 0]
+            },
+            "modules": [
+                {
+                    "type": "resources",
+                    "uuid": module_uuid,
+                    "version": [1, 0, 0]
+                }
+            ]
         }
-    except Exception as e:
-        print(f"❌ Ошибка парсинга .mcstructure: {e}")
-        return None
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2))
 
-def generate_mcpack(structure_data: Dict) -> Optional[str]:
-    """
-    Генерирует .mcpack (Behavior Pack) с послойными функциями под Armor Stand.
-    Возвращает путь к файлу или None, если структура пуста.
-    """
-    if not structure_data:
-        return None
+        # pack_icon.png
+        zf.writestr("pack_icon.png", ICON_PNG)
 
-    palette = structure_data["palette"]
-    blocks = structure_data["blocks"]
+        # Текстура для голограммы
+        zf.writestr("textures/entity/hologram.png", HOLOGRAM_PNG)
 
-    # Создаем временную папку для сборки
-    temp_dir = tempfile.mkdtemp()
-    pack_dir = os.path.join(temp_dir, "HologramBP")
-    func_dir = os.path.join(pack_dir, "functions", "hologram")
-    os.makedirs(func_dir, exist_ok=True)
+        # Геометрии для каждой позы (0 … max_pose)
+        for pose in range(max_pose + 1):
+            bones = []
+            for y in range(pose + 1):
+                if y in layers and layers[y]:
+                    cubes = []
+                    for (bx, by, bz) in layers[y]:
+                        cubes.append({
+                            "origin": [bx + 0.5, by + 0.5, bz + 0.5],
+                            "size": [1, 1, 1],
+                            "uv": [0, 0]
+                        })
+                    bones.append({
+                        "name": f"layer_{y}",
+                        "pivot": [0, 0, 0],
+                        "cubes": cubes
+                    })
+            geometry = {
+                "format_version": "1.12.0",
+                "minecraft:geometry": [
+                    {
+                        "description": {
+                            "identifier": f"geometry.hologram_pose_{pose}",
+                            "texture_width": 1,
+                            "texture_height": 1
+                        },
+                        "bones": bones
+                    }
+                ]
+            }
+            zf.writestr(
+                f"models/entity/geometry.hologram_pose_{pose}.json",
+                json.dumps(geometry, indent=2)
+            )
 
-    # 1. Создаем manifest.json для Behavior Pack
-    manifest = {
-        "format_version": 2,
-        "header": {
-            "name": "Hologram Generator",
-            "description": "Generated by Telegram Bot",
-            "uuid": "a17e4e30-7c87-4c74-8c21-1bbdef1c1711",
-            "version": [1, 0, 0],
-            "min_engine_version": [1, 19, 0]
-        },
-        "modules": [{
-            "type": "data",
-            "uuid": "b17e4e30-7c87-4c74-8c21-1bbdef1c1712",
-            "version": [1, 0, 0]
-        }]
-    }
-    with open(os.path.join(pack_dir, "manifest.json"), "w") as f:
-        json.dump(manifest, f, indent=2)
+        # Render controller для выбора геометрии по позе
+        geo_array = [f"geometry.hologram_pose_{i}" for i in range(max_pose + 1)]
+        render_controller = {
+            "format_version": "1.10.0",
+            "render_controllers": {
+                "controller.render.armor_stand_hologram": {
+                    "arrays": {
+                        "geometries": {
+                            "Array.geos": geo_array
+                        }
+                    },
+                    "geometry": f"Array.geos[math.min(q.pose_index, {max_pose})]",
+                    "materials": [{"*": "entity_alphatest"}],
+                    "textures": ["textures/entity/hologram"]
+                }
+            }
+        }
+        zf.writestr(
+            "render_controllers/armor_stand_hologram.render_controllers.json",
+            json.dumps(render_controller, indent=2)
+        )
 
-    # 2. Сортировка блоков по слоям (Ось Y)
-    layers = {}
-    for block in blocks:
-        if isinstance(block, list) and len(block) >= 4:
-            pos_x = int(block[0])
-            pos_y = int(block[1])
-            pos_z = int(block[2])
-            palette_idx = int(block[3])
-            
-            # Пропускаем битые индексы палитры
-            if palette_idx >= len(palette):
-                continue
+        # Клиентская сущность, заменяющая бронестойку
+        client_entity = {
+            "format_version": "1.10.0",
+            "minecraft:client_entity": {
+                "description": {
+                    "identifier": "minecraft:armor_stand",
+                    "materials": {
+                        "default": "entity_alphatest"
+                    },
+                    "textures": {
+                        "default": "textures/entity/hologram"
+                    },
+                    "geometry": {
+                        "default": "geometry.hologram_pose_0"
+                    },
+                    "render_controllers": [
+                        "controller.render.armor_stand_hologram"
+                    ]
+                }
+            }
+        }
+        zf.writestr("entity/armor_stand.entity.json", json.dumps(client_entity, indent=2))
 
-            # Получаем имя блока и безопасно конвертируем в строку
-            block_data = palette[palette_idx]
-            block_name = block_data.get("name", "minecraft:air")
-            
-            # ВАЖНЫЙ ФИКС: nbtlib возвращает TagString, преобразуем в обычный str
-            if hasattr(block_name, "value"):
-                block_name = block_name.value
-            elif not isinstance(block_name, str):
-                block_name = str(block_name)
-
-            # Пропускаем воздух
-            if block_name == "minecraft:air":
-                continue
-
-            # Группируем по координате Y
-            if pos_y not in layers:
-                layers[pos_y] = []
-            layers[pos_y].append(f"setblock ~{pos_x} ~{pos_y} ~{pos_z} {block_name}")
-
-    # Если в здании совсем нет блоков (только воздух), возвращаем None
-    if not layers:
-        print("❌ Структура не содержит блоков (пустой .mcstructure)")
-        return None
-
-    # 3. Генерируем функции для каждого слоя (Y)
-    for y, commands in layers.items():
-        layer_file = os.path.join(func_dir, f"layer_{y}.mcfunction")
-        with open(layer_file, "w") as f:
-            for cmd in commands:
-                f.write(cmd + "\n")
-
-    # 4. Генерируем основную функцию summon.mcfunction
-    first_layer = sorted(layers.keys())[0]
-    summon_file = os.path.join(pack_dir, "functions", "summon.mcfunction")
-    with open(summon_file, "w") as f:
-        f.write(f"summon armor_stand ~ ~ ~ {{Invisible:1b, NoBasePlate:1b, ShowArms:0b, Tags:[\"hologram_stand\"], Pose:{{Body:[0f,0f,0f]}}}}\n")
-        f.write(f"execute as @e[type=armor_stand,tag=hologram_stand,limit=1] at @s run function hologram/layer_{first_layer}\n")
-        f.write("### Используй команды /function hologram/layer_0, /function hologram/layer_1 ... для переключения слоев\n")
-
-    # 5. Упаковываем в .mcpack (вместо .mcaddon!)
-    output_filename = os.path.join(tempfile.gettempdir(), "hologram.mcpack")
-    with zipfile.ZipFile(output_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk(pack_dir):
-            for file in files:
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, temp_dir)
-                zipf.write(full_path, rel_path)
-
-    # Очистка временных файлов
-    shutil.rmtree(temp_dir)
-    return output_filename
+    return zip_buf.getvalue()
