@@ -11,8 +11,7 @@ from aiogram.utils.formatting import Text, Bold, Italic, Code
 
 from config import BOT_TOKEN, ADMIN_ID, BASE_DIR
 from database import db
-from parser import get_generator
-
+from parser import HoloGenerator
 # Инициализация
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
