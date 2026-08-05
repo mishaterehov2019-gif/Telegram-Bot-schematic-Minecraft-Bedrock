@@ -10,7 +10,7 @@ import db
 import parser
 
 # КОНФИГУРАЦИЯ БОТА (Замените на свои данные)
-TOKEN = "ВАШ_ТЕЛЕГРАМ_БОТ_ТОКЕН"
+TOKEN = "8987954193:AAEbC9h7SPAmAWlhOjEwrD0xle1t0zLb7eA"
 ADMIN_ID = 123456789  # Ваш реальный Telegram ID цифрами
 
 bot = Bot(token=TOKEN)
