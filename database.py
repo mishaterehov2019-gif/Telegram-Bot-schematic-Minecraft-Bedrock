@@ -34,6 +34,11 @@ async def create_user(telegram_id: int, nickname: str):
                          (telegram_id, nickname))
         await db.commit()
 
+async def update_user_nick(telegram_id: int, new_nick: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET minecraft_nickname = ? WHERE telegram_id = ?", (new_nick, telegram_id))
+        await db.commit()
+
 async def update_user_balance(telegram_id: int, amount: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET balance_generations = balance_generations + ? WHERE telegram_id = ?", 
