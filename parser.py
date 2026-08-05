@@ -6,7 +6,6 @@ import shutil
 import nbtlib
 
 def create_manifest(pack_name):
-    # Используем list() вместо квадратных скобок, чтобы избежать пропадания символов
     v_head = list()
     v_head.append(1)
     v_head.append(0)
@@ -37,13 +36,17 @@ def create_manifest(pack_name):
     }
 
 def build_hologram_geometry(structure_path):
-    nbt_file = nbtlib.load(structure_path)
+    # Обязательно указываем byteorder="little", так как Bedrock использует Little-Endian
+    nbt_file = nbtlib.load(structure_path, byteorder="little")
     
-    size = nbt_file.root['size']
-    width = int(size[0])
-    height = int(size[1])
-    depth = int(size[2])
+    # Читаем список из 3-х элементов [X, Y, Z]
+    size_list = nbt_file.root['size']
+    width = int(size_list[0])   # X
+    height = int(size_list[1])  # Y
+    depth = int(size_list[2])   # Z
     
+    # В Bedrock block_indices - это список списков (обычно для двух слоев блоков)
+    # Берем первый (основной) слой блоков
     block_indices = nbt_file.root['structure']['block_indices'][0]
     palette = nbt_file.root['structure']['palette']['default']['block_palette']
     
@@ -74,12 +77,17 @@ def build_hologram_geometry(structure_path):
         "pivot": piv_root,
         "cubes": list()
     }
-    geometry["minecraft:geometry"][0]["bones"].append(base_bone)
+    geometry["minecraft:geometry"]["bones"].append(base_bone)
 
+    # Индексация блоков в Bedrock идет по порядку ZYX
     idx = 0
     for x in range(width):
         for y in range(height):
             for z in range(depth):
+                # На всякий случай проверяем границы массива индексов
+                if idx >= len(block_indices):
+                    break
+                    
                 block_idx = int(block_indices[idx])
                 idx += 1
                 
@@ -93,7 +101,7 @@ def build_hologram_geometry(structure_path):
                 
                 layer_bone_name = f"layer_y_{y}"
                 
-                layer_bone = next((b for b in geometry["minecraft:geometry"][0]["bones"] if b["name"] == layer_bone_name), None)
+                layer_bone = next((b for b in geometry["minecraft:geometry"]["bones"] if b["name"] == layer_bone_name), None)
                 if not layer_bone:
                     piv_layer = list()
                     piv_layer.append(0.0)
@@ -106,7 +114,7 @@ def build_hologram_geometry(structure_path):
                         "pivot": piv_layer,
                         "cubes": list()
                     }
-                    geometry["minecraft:geometry"][0]["bones"].append(layer_bone)
+                    geometry["minecraft:geometry"]["bones"].append(layer_bone)
                 
                 c_origin = list()
                 c_origin.append(float(x)*16.0)
