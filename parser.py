@@ -17,13 +17,32 @@ class HoloGenerator:
         try:
             data = nbtlib.load(file_path)
             
-            structure_data = {
-                "name": data.get("name", "Голограмма"),
-                "size": {
-                    "x": data["size"]["x"],
-                    "y": data["size"]["y"],
-                    "z": data["size"]["z"]
-                },
+                 # Получаем данные структуры через .get()
+        # NBT теги ведут себя как словари, поэтому используем .get()
+        size_tag = data.get("size")
+        
+        # Если size_tag не найден или это не список, пытаемся найти его внутри data["size"]
+        # Иногда .mcstructure хранят это поле немного иначе
+        if size_tag is None:
+            # Пробуем достать из корневого тега "size", который может быть словарем
+            size_tag = data.get("size", {})
+        
+        # Теперь проверяем, что это за объект и берем координаты
+        # Используем .get() для всех осей
+        x = size_tag.get("x", 0)
+        y = size_tag.get("y", 0)
+        z = size_tag.get("z", 0)
+
+        structure_data = {
+            "name": data.get("name", "Голограмма"),
+            "size": {
+                "x": x,
+                "y": y,
+                "z": z
+            },
+            "palette": [],
+            "blocks": []
+        }
                 "palette": [],
                 "blocks": []
             }
