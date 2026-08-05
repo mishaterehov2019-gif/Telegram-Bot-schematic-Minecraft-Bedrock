@@ -5,23 +5,20 @@ import zipfile
 import struct
 import zlib
 import uuid
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 import nbtlib
-from nbtlib.tag import Compound, List as NBTList, Int
+from nbtlib.tag import Compound, List as NBTList
 
 def create_png(width: int, height: int, rgba: Tuple[int, int, int, int]) -> bytes:
-    """
-    Генератор валидного PNG без сторонних библиотек.
-    rgba: (R, G, B, A) — значения 0..255.
-    """
+    """Генератор валидного PNG без сторонних библиотек."""
     def chunk(ctype: bytes, data: bytes) -> bytes:
         c = ctype + data
         crc = struct.pack('>I', zlib.crc32(c) & 0xffffffff)
         return struct.pack('>I', len(data)) + c + crc
 
     signature = b'\x89PNG\r\n\x1a\n'
-    ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)  # 8-bit RGBA
+    ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)
     ihdr = chunk(b'IHDR', ihdr_data)
 
     raw = b''
@@ -39,8 +36,8 @@ def parse_mcstructure(file_bytes: bytes) -> List[Tuple[int, int, int, str]]:
     Парсит .mcstructure (Little-Endian) и возвращает список (x, y, z, block_name).
     Поднимает исключение при ошибке парсинга.
     """
-    # nbtlib по умолчанию big-endian, но Bedrock использует little-endian
-    root: Compound = nbtlib.load(io.BytesIO(file_bytes), byteorder='little')
+    # ИСПРАВЛЕНО: loads вместо load и передаём байты напрямую
+    root: Compound = nbtlib.loads(file_bytes, byteorder='little')
     size_tag = root['size']
     size_x = int(size_tag[0])
     size_y = int(size_tag[1])
@@ -52,7 +49,6 @@ def parse_mcstructure(file_bytes: bytes) -> List[Tuple[int, int, int, str]]:
     default_palette: Compound = palette['default']
     block_palette: NBTList = default_palette['block_palette']
 
-    # Проверяем длину block_indices
     expected_len = size_x * size_y * size_z
     if len(block_indices) != expected_len:
         raise ValueError(f"Некорректная длина block_indices: ожидалось {expected_len}, получено {len(block_indices)}")
@@ -63,14 +59,12 @@ def parse_mcstructure(file_bytes: bytes) -> List[Tuple[int, int, int, str]]:
             for x in range(size_x):
                 idx_1d = x + z * size_x + y * size_x * size_z
                 entry = block_indices[idx_1d]
-                # entry может быть int или list (с несколькими слоями блока)
                 if isinstance(entry, list):
                     palette_index = int(entry[0]) if len(entry) > 0 else -1
                 else:
                     palette_index = int(entry)
 
                 if palette_index < 0 or palette_index >= len(block_palette):
-                    # Пропускаем воздух/некорректные индексы
                     continue
 
                 block_data = block_palette[palette_index]
@@ -113,7 +107,6 @@ def generate_animation(blocks: List[Tuple[int, int, int, str]]) -> dict:
     bones_visibility = {}
     for (x, y, z, _) in blocks:
         bone_name = f"block_{x}_{y}_{z}"
-        # Выражение Molang: показывать, если поза >= y
         bones_visibility[bone_name] = {
             "visible": f"query.armor_stand_pose_index >= {y}"
         }
@@ -129,7 +122,7 @@ def generate_animation(blocks: List[Tuple[int, int, int, str]]) -> dict:
     return animation
 
 def generate_entity_definition() -> dict:
-    """Клиентское определение сущности, заменяющее стандартный Armor Stand."""
+    """Клиентское определение сущности."""
     return {
         "format_version": "1.10.0",
         "minecraft:client_entity": {
@@ -149,7 +142,7 @@ def generate_entity_definition() -> dict:
     }
 
 def generate_manifest() -> dict:
-    """Манифест ресурс-пака с уникальными UUID."""
+    """Манифест с уникальными UUID."""
     return {
         "format_version": 2,
         "header": {
@@ -169,23 +162,17 @@ def generate_manifest() -> dict:
     }
 
 def pack_mcpack(geometry: dict, animation: dict, entity: dict, manifest: dict) -> bytes:
-    """
-    Упаковывает все файлы в ZIP-архив и возвращает его байты.
-    Внутри архива создаётся директория структуры ресурс-пака.
-    """
-    # Текстуры: 16x16 полупрозрачный голубой блок и иконка пака 64x64
+    """Упаковывает все файлы в ZIP (mcpack)."""
     hologram_tex = create_png(16, 16, (0, 100, 200, 100))
     pack_icon = create_png(64, 64, (0, 80, 180, 255))
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Создаём структуру папок
         base = os.path.join(tmpdir, "hologram_pack")
         os.makedirs(os.path.join(base, "entity"), exist_ok=True)
         os.makedirs(os.path.join(base, "models", "entity"), exist_ok=True)
         os.makedirs(os.path.join(base, "animations"), exist_ok=True)
         os.makedirs(os.path.join(base, "textures", "blocks"), exist_ok=True)
 
-        # Запись файлов
         import json
         with open(os.path.join(base, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=4)
@@ -200,7 +187,6 @@ def pack_mcpack(geometry: dict, animation: dict, entity: dict, manifest: dict) -
         with open(os.path.join(base, "textures", "blocks", "hologram.png"), "wb") as f:
             f.write(hologram_tex)
 
-        # Создание ZIP в памяти
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for root_dir, dirs, files in os.walk(base):
