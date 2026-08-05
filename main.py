@@ -1,167 +1,146 @@
-import asyncio
-import logging
 import os
-from io import BytesIO
-
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import CommandStart, Command
+import asyncio
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, BufferedInputFile
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import FSInputFile
 
 import db
-from parser import generate_mcpack
+import parser
 
-# ---------- Настройки ----------
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 123456789          # ← замените на свой Telegram ID
+# КОНФИГУРАЦИЯ БОТА (Замените на свои данные)
+TOKEN = "ВАШ_ТЕЛЕГРАМ_БОТ_ТОКЕН"
+ADMIN_ID = 123456789  # Ваш реальный Telegram ID цифрами
 
-if not TOKEN:
-    raise RuntimeError("Не задан BOT_TOKEN. Укажите его в переменной окружения или прямо в коде.")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ---------- Инициализация ----------
 bot = Bot(token=TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-router = Router()
+dp = Dispatcher()
 
-# ---------- FSM ----------
-class RegForm(StatesGroup):
+class Registration(StatesGroup):
     waiting_for_nickname = State()
 
-# ---------- Утилита профиля ----------
-async def show_profile(message: Message, user):
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    user = await db.get_user(message.from_user.id)
+    if user:
+        # Если уже зарегистрирован, выводим данные профиля
+        await message.answer(
+            f"👤 Ваш профиль:\n"
+            f"┣ Ник в Minecraft: `{user['minecraft_nickname']}`\n"
+            f"┗ Доступно генераций: *{user['balance_generations']}*\n\n"
+            f"Отправьте мне файл `.mcstructure`, чтобы создать голограмму."
+        )
+    else:
+        # Первая регистрация
+        await message.answer("Добро пожаловать в HoloPrint бот!\nВведите ваш никнейм в Майнкрафте для регистрации:")
+        await state.set_state(Registration.waiting_for_nickname)
+
+@dp.message(Registration.waiting_for_nickname)
+async def process_nickname(message: types.Message, state: FSMContext):
+    nickname = message.text.strip()
+    if len(nickname) < 3 or " " in nickname:
+        await message.answer("Некорректный никнейм. Пожалуйста, введите правильный ник без пробелов:")
+        return
+    
+    await db.register_user(message.from_user.id, nickname)
+    await state.clear()
     await message.answer(
-        f"📋 Ваш профиль:\n"
-        f"🎮 Никнейм: {user['minecraft_nickname']}\n"
-        f"🔋 Осталось генераций: {user['balance_generations']}"
+        f"Регистрация успешна! Ваш ник: `{nickname}`\n"
+        f"Вам начислено 3 стартовые генерации.\n"
+        f"Теперь вы можете отправить файл `.mcstructure`."
     )
 
-# ---------- Команда /start ----------
-@router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
+@dp.message(Command("profile"))
+async def cmd_profile(message: types.Message):
     user = await db.get_user(message.from_user.id)
-    if user:
-        await state.clear()  # на случай, если осталось незавершённое состояние
-        await show_profile(message, user)
-    else:
-        await state.set_state(RegForm.waiting_for_nickname)
-        await message.answer(
-            "👋 Добро пожаловать! Для использования бота введите ваш никнейм в Minecraft Bedrock.\n"
-            "Используйте только буквы, цифры и подчёркивания, без пробелов (до 16 символов)."
-        )
-
-# ---------- Команда /profile ----------
-@router.message(Command("profile"))
-async def cmd_profile(message: Message):
-    user = await db.get_user(message.from_user.id)
-    if user:
-        await show_profile(message, user)
-    else:
-        await message.answer("Вы ещё не зарегистрированы. Напишите /start")
-
-# ---------- Команда администратора /add ----------
-@router.message(Command("add"))
-async def cmd_add(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return  # тихо игнорируем
-    parts = message.text.strip().split()
-    if len(parts) != 3:
-        await message.answer("Использование: /add <никнейм> <количество>")
+    if not user:
+        await message.answer("Вы не зарегистрированы. Напишите /start")
         return
-    _, nickname, amount_str = parts
+    await message.answer(
+        f"👤 Профиль игрока:\n"
+        f"┣ Ник: `{user['minecraft_nickname']}`\n"
+        f"┗ Баланс: *{user['balance_generations']}* генераций"
+    )
+
+# Команда администратора для начисления баланса
+@dp.message(Command("add"))
+async def cmd_add_balance(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return # Игнорируем, если пишет не админ
+
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("Ошибка! Формат команды: `/add [ник_майнкрафт] [количество]`")
+        return
+        
+    target_nick = args[1]
     try:
-        amount = int(amount_str)
+        amount = int(args[2])
     except ValueError:
         await message.answer("Количество должно быть целым числом.")
         return
-    user = await db.get_user_by_nickname(nickname)
-    if not user:
-        await message.answer(f"Игрок с никнеймом '{nickname}' не найден в базе.")
-        return
-    new_balance = await db.update_balance(user['telegram_id'], amount)
-    await message.answer(
-        f"✅ Баланс игрока {nickname} пополнен на {amount}.\n"
-        f"Текущий баланс: {new_balance}"
-    )
 
-# ---------- Приём никнейма (FSM) ----------
-@router.message(RegForm.waiting_for_nickname)
-async def process_nickname(message: Message, state: FSMContext):
-    nick = message.text.strip()
-    if not (1 <= len(nick) <= 16) or ' ' in nick:
-        await message.answer("❌ Никнейм должен быть от 1 до 16 символов и без пробелов.")
-        return
-    # Проверка уникальности никнейма
-    existing = await db.get_user_by_nickname(nick)
-    if existing:
-        await message.answer("❌ Этот никнейм уже используется другим пользователем. Придумайте другой.")
-        return
-    try:
-        await db.create_user(message.from_user.id, nick)
-    except Exception:
-        # Если другой процесс уже вставил запись – аккуратно обработаем
-        await message.answer("⚠️ Ошибка базы данных. Попробуйте другой никнейм.")
-        return
+    new_balance = await db.update_balance(target_nick, amount)
+    if new_balance is None:
+        await message.answer(f"Пользователь с ником `{target_nick}` не найден в базе данных.")
+    else:
+        await message.answer(f"Баланс игрока `{target_nick}` успешно изменен. Текущий баланс: *{new_balance}*")
 
-    await state.clear()
-    await message.answer(f"✅ Регистрация завершена! Ваш никнейм: {nick}.\nВам начислено 3 стартовые генерации.")
-    user = await db.get_user(message.from_user.id)
-    await show_profile(message, user)
-
-# ---------- Обработка файлов .mcstructure ----------
-@router.message(F.document.file_name.endswith(".mcstructure"))
-async def handle_mcstructure(message: Message):
+# Обработчик входящих файлов структур
+@dp.message(F.document)
+async def handle_structure_file(message: types.Message):
     user = await db.get_user(message.from_user.id)
     if not user:
-        await message.answer("⛔ Сначала зарегистрируйтесь через /start")
+        await message.answer("Сначала зарегистрируйтесь, отправив команду /start")
         return
+        
     if user['balance_generations'] <= 0:
-        await message.answer("❌ У вас не осталось генераций. Обратитесь к администратору.")
+        await message.answer("Недостаточно генераций на балансе. Обратитесь к администратору для пополнения.")
         return
 
-    # Скачиваем файл
     document = message.document
-    file = await bot.get_file(document.file_id)
-    file_bytes_io = BytesIO()
-    await bot.download(file, destination=file_bytes_io)
-    file_bytes_io.seek(0)
-    file_bytes = file_bytes_io.read()
-
-    # Генерация .mcpack
-    try:
-        mcpack_bytes = generate_mcpack(file_bytes)
-    except Exception as e:
-        logger.exception("Ошибка генерации mcpack")
-        await message.answer(
-            "⚠️ Не удалось обработать файл. Убедитесь, что это корректный .mcstructure из Minecraft Bedrock."
-        )
+    if not document.file_name.endswith('.mcstructure'):
+        await message.answer("Пожалуйста, отправьте корректный файл структуры с расширением `.mcstructure`")
         return
 
-    # Списываем генерацию
-    new_balance = await db.update_balance(user['telegram_id'], -1)
+    status_msg = await message.answer("⏳ Чтение структуры и генерация голограммы... Пожалуйста, подождите.")
+    
+    # Скачивание файла
+    os.makedirs("downloads", exist_ok=True)
+    os.makedirs("output", exist_ok=True)
+    
+    file_path = f"downloads/{document.file_id}.mcstructure"
+    await bot.download(document.file_id, destination=file_path)
 
-    # Отправляем результат
-    original_name = document.file_name
-    out_filename = original_name.rsplit('.', 1)[0] + '.mcpack'
     try:
+        # Процесс парсинга и сборки ресурс-пака
+        mcpack_output = parser.compile_mcpack(file_path, "output", document.file_id)
+        
+        # Списание генерации
+        await db.decrease_balance(message.from_user.id)
+        
+        # Отправка готового файла пользователю
+        input_file = FSInputFile(mcpack_output, filename=f"HoloPrint_{user['minecraft_nickname']}.mcpack")
         await message.answer_document(
-            BufferedInputFile(mcpack_bytes, filename=out_filename),
-            caption=f"✅ Голограмма готова! Списана 1 генерация.\nВаш баланс: {new_balance}"
+            document=input_file, 
+            caption="✅ Голограмма успешно создана!\nИмпортируйте этот `.mcpack` в Minecraft. Поставьте стойку для брони и меняйте её позы для переключения слоев."
         )
-    except Exception:
-        # Возвращаем генерацию при ошибке отправки
-        await db.update_balance(user['telegram_id'], +1)
-        logger.exception("Ошибка отправки файла")
-        await message.answer("⚠️ Не удалось отправить файл, генерация возвращена. Попробуйте позже.")
+        
+        # Удаление временного mcpack
+        if os.path.exists(mcpack_output):
+            os.remove(mcpack_output)
+            
+    except Exception as e:
+        await message.answer(f"❌ Произошла ошибка при обработке файла: {e}\nУбедитесь, что это валидный .mcstructure файл Bedrock Edition.")
+    finally:
+        # Очистка входящего файла
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        await status_msg.delete()
 
-# ---------- Точка входа ----------
 async def main():
     await db.init_db()
-    dp.include_router(router)
+    print("База данных запущена, бот начинает опрос серверов...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
