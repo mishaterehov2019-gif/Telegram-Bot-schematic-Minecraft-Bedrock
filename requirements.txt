@@ -1,0 +1,5 @@
+aiogram==3.15.0
+aiosqlite==0.20.0
+nbtlib==1.12.1
+Pillow==10.4.0
+aiofiles==24.1.0
