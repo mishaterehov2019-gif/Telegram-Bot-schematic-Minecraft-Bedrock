@@ -1,117 +1,211 @@
-def build_hologram_geometry(structure_path):
-    # Загружаем файл с явным указанием Little Endian (формат Бедрок)
-    nbt_file = nbtlib.load(structure_path, byteorder="little")
-    
-    # Преобразуем элементы NBT-размеров в стандартный Python-список чисел [X, Y, Z]
-    size_list = [int(x) for x in nbt_file.root['size']]
-    width = size_list[0]   # X
-    height = size_list[1]  # Y
-    depth = size_list[2]   # Z
-    
-    # В Bedrock block_indices — это словарь (Compound). Основной слой блоков лежит под ключом '0' (или строкой "0")
-    # Достаем его и принудительно превращаем в плоский список целых чисел Python
-    raw_indices = nbt_file.root['structure']['block_indices']
-    
-    # Пытаемся получить слой 0 как по индексу 0, так и по строковому ключу "0" для совместимости версий
-    if "0" in raw_indices:
-        layer_0 = raw_indices["0"]
-    else:
-        layer_0 = raw_indices[0]
-        
-    block_indices = [int(x) for x in layer_0]
-    
-    # Извлекаем палитру блоков
-    palette = nbt_file.root['structure']['palette']['default']['block_palette']
-    
+import io
+import os
+import tempfile
+import zipfile
+import struct
+import zlib
+import uuid
+from typing import List, Tuple, Optional
+
+import nbtlib
+from nbtlib.tag import Compound, List as NBTList, Int
+
+def create_png(width: int, height: int, rgba: Tuple[int, int, int, int]) -> bytes:
+    """
+    Генератор валидного PNG без сторонних библиотек.
+    rgba: (R, G, B, A) — значения 0..255.
+    """
+    def chunk(ctype: bytes, data: bytes) -> bytes:
+        c = ctype + data
+        crc = struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+        return struct.pack('>I', len(data)) + c + crc
+
+    signature = b'\x89PNG\r\n\x1a\n'
+    ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)  # 8-bit RGBA
+    ihdr = chunk(b'IHDR', ihdr_data)
+
+    raw = b''
+    for y in range(height):
+        raw += b'\x00'  # filter none
+        for x in range(width):
+            raw += struct.pack('BBBB', *rgba)
+    compressed = zlib.compress(raw)
+    idat = chunk(b'IDAT', compressed)
+    iend = chunk(b'IEND', b'')
+    return signature + ihdr + idat + iend
+
+def parse_mcstructure(file_bytes: bytes) -> List[Tuple[int, int, int, str]]:
+    """
+    Парсит .mcstructure (Little-Endian) и возвращает список (x, y, z, block_name).
+    Поднимает исключение при ошибке парсинга.
+    """
+    # nbtlib по умолчанию big-endian, но Bedrock использует little-endian
+    root: Compound = nbtlib.load(io.BytesIO(file_bytes), byteorder='little')
+    size_tag = root['size']
+    size_x = int(size_tag[0])
+    size_y = int(size_tag[1])
+    size_z = int(size_tag[2])
+
+    structure: Compound = root['structure']
+    block_indices: NBTList = structure['block_indices']
+    palette: Compound = structure['palette']
+    default_palette: Compound = palette['default']
+    block_palette: NBTList = default_palette['block_palette']
+
+    # Проверяем длину block_indices
+    expected_len = size_x * size_y * size_z
+    if len(block_indices) != expected_len:
+        raise ValueError(f"Некорректная длина block_indices: ожидалось {expected_len}, получено {len(block_indices)}")
+
+    result = []
+    for y in range(size_y):
+        for z in range(size_z):
+            for x in range(size_x):
+                idx_1d = x + z * size_x + y * size_x * size_z
+                entry = block_indices[idx_1d]
+                # entry может быть int или list (с несколькими слоями блока)
+                if isinstance(entry, list):
+                    palette_index = int(entry[0]) if len(entry) > 0 else -1
+                else:
+                    palette_index = int(entry)
+
+                if palette_index < 0 or palette_index >= len(block_palette):
+                    # Пропускаем воздух/некорректные индексы
+                    continue
+
+                block_data = block_palette[palette_index]
+                block_name = str(block_data['name'])
+                result.append((x, y, z, block_name))
+    return result
+
+def generate_geometry(blocks: List[Tuple[int, int, int, str]]) -> dict:
+    """Создаёт геометрию для Armor Stand с костями для каждого блока."""
+    bones = [{"name": "body", "pivot": [0, 0, 0]}]
+    for (x, y, z, block_name) in blocks:
+        bone_name = f"block_{x}_{y}_{z}"
+        bones.append({
+            "name": bone_name,
+            "parent": "body",
+            "pivot": [x, y, z],
+            "cubes": [{
+                "origin": [0, 0, 0],
+                "size": [1, 1, 1],
+                "uv": [0, 0]
+            }]
+        })
     geometry = {
         "format_version": "1.12.0",
         "minecraft:geometry": [
             {
                 "description": {
-                    "identifier": "geometry.armor_stand.holoprint",
-                    "texture_width": 64,
-                    "texture_height": 64,
-                    "visible_bounds_width": float(width + 2),
-                    "visible_bounds_height": float(height + 2),
-                    "visible_bounds_offset": list([0.0, float(height)/2, 0.0])
+                    "identifier": "geometry.armor_stand_custom",
+                    "texture_width": 16,
+                    "texture_height": 16
                 },
-                "bones": list()
+                "bones": bones
             }
         ]
     }
-    
-    piv_root = list()
-    piv_root.append(0.0)
-    piv_root.append(0.0)
-    piv_root.append(0.0)
-    
-    base_bone = {
-        "name": "root",
-        "pivot": piv_root,
-        "cubes": list()
-    }
-    geometry["minecraft:geometry"]["bones"].append(base_bone)
-
-    # В Minecraft Bedrock индексация слоев идет строго по формуле: (x * height + y) * depth + z
-    # Поэтому циклы должны идти в порядке: X -> Y -> Z
-    for x in range(width):
-        for y in range(height):
-            for z in range(depth):
-                # Математический расчет индекса блока в массиве Bedrock
-                idx = (x * height + y) * depth + z
-                
-                if idx >= len(block_indices):
-                    break
-                    
-                block_idx = block_indices[idx]
-                
-                # Индекс -1 означает отсутствие блока (воздух)
-                if block_idx == -1:
-                    continue
-                    
-                # Безопасно берем данные блока из палитры по индексу
-                block_data = palette[block_idx]
-                block_name = str(block_data['name'])
-                
-                # Пропускаем воздух
-                if "air" in block_name:
-                    continue
-                
-                layer_bone_name = f"layer_y_{y}"
-                
-                layer_bone = next((b for b in geometry["minecraft:geometry"]["bones"] if b["name"] == layer_bone_name), None)
-                if not layer_bone:
-                    piv_layer = list()
-                    piv_layer.append(0.0)
-                    piv_layer.append(float(y)*16.0)
-                    piv_layer.append(0.0)
-                    
-                    layer_bone = {
-                        "name": layer_bone_name,
-                        "parent": "root",
-                        "pivot": piv_layer,
-                        "cubes": list()
-                    }
-                    geometry["minecraft:geometry"]["bones"].append(layer_bone)
-                
-                c_origin = list()
-                c_origin.append(float(x)*16.0)
-                c_origin.append(float(y)*16.0)
-                c_origin.append(float(z)*16.0)
-                
-                c_size = list()
-                c_size.append(16.0)
-                c_size.append(16.0)
-                c_size.append(16.0)
-                
-                c_uv = list()
-                c_uv.append(0.0)
-                c_uv.append(0.0)
-                
-                layer_bone["cubes"].append({
-                    "origin": c_origin,
-                    "size": c_size,
-                    "uv": c_uv
-                })
-                
     return geometry
+
+def generate_animation(blocks: List[Tuple[int, int, int, str]]) -> dict:
+    """Анимация, делающая видимыми кости блоков, если pose_index >= Y."""
+    bones_visibility = {}
+    for (x, y, z, _) in blocks:
+        bone_name = f"block_{x}_{y}_{z}"
+        # Выражение Molang: показывать, если поза >= y
+        bones_visibility[bone_name] = {
+            "visible": f"query.armor_stand_pose_index >= {y}"
+        }
+    animation = {
+        "format_version": "1.8.0",
+        "animations": {
+            "animation.armor_stand.visibility": {
+                "loop": True,
+                "bones": bones_visibility
+            }
+        }
+    }
+    return animation
+
+def generate_entity_definition() -> dict:
+    """Клиентское определение сущности, заменяющее стандартный Armor Stand."""
+    return {
+        "format_version": "1.10.0",
+        "minecraft:client_entity": {
+            "description": {
+                "identifier": "minecraft:armor_stand",
+                "materials": {"default": "entity_alphatest"},
+                "textures": {"default": "textures/blocks/hologram"},
+                "geometry": {"default": "geometry.armor_stand_custom"},
+                "animations": {
+                    "layer_visibility": "animation.armor_stand.visibility"
+                },
+                "scripts": {
+                    "animate": ["layer_visibility"]
+                }
+            }
+        }
+    }
+
+def generate_manifest() -> dict:
+    """Манифест ресурс-пака с уникальными UUID."""
+    return {
+        "format_version": 2,
+        "header": {
+            "description": "Structure hologram pack",
+            "name": "Structure Hologram",
+            "uuid": str(uuid.uuid4()),
+            "version": [1, 0, 0],
+            "min_engine_version": [1, 13, 0]
+        },
+        "modules": [
+            {
+                "type": "resources",
+                "uuid": str(uuid.uuid4()),
+                "version": [1, 0, 0]
+            }
+        ]
+    }
+
+def pack_mcpack(geometry: dict, animation: dict, entity: dict, manifest: dict) -> bytes:
+    """
+    Упаковывает все файлы в ZIP-архив и возвращает его байты.
+    Внутри архива создаётся директория структуры ресурс-пака.
+    """
+    # Текстуры: 16x16 полупрозрачный голубой блок и иконка пака 64x64
+    hologram_tex = create_png(16, 16, (0, 100, 200, 100))
+    pack_icon = create_png(64, 64, (0, 80, 180, 255))
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Создаём структуру папок
+        base = os.path.join(tmpdir, "hologram_pack")
+        os.makedirs(os.path.join(base, "entity"), exist_ok=True)
+        os.makedirs(os.path.join(base, "models", "entity"), exist_ok=True)
+        os.makedirs(os.path.join(base, "animations"), exist_ok=True)
+        os.makedirs(os.path.join(base, "textures", "blocks"), exist_ok=True)
+
+        # Запись файлов
+        import json
+        with open(os.path.join(base, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=4)
+        with open(os.path.join(base, "pack_icon.png"), "wb") as f:
+            f.write(pack_icon)
+        with open(os.path.join(base, "entity", "armor_stand.entity.json"), "w", encoding="utf-8") as f:
+            json.dump(entity, f, indent=4)
+        with open(os.path.join(base, "models", "entity", "geometry.armor_stand_custom.json"), "w", encoding="utf-8") as f:
+            json.dump(geometry, f, indent=4)
+        with open(os.path.join(base, "animations", "armor_stand.animation.json"), "w", encoding="utf-8") as f:
+            json.dump(animation, f, indent=4)
+        with open(os.path.join(base, "textures", "blocks", "hologram.png"), "wb") as f:
+            f.write(hologram_tex)
+
+        # Создание ZIP в памяти
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root_dir, dirs, files in os.walk(base):
+                for file in files:
+                    full_path = os.path.join(root_dir, file)
+                    arcname = os.path.relpath(full_path, tmpdir)
+                    zf.write(full_path, arcname)
+        return zip_buffer.getvalue()
