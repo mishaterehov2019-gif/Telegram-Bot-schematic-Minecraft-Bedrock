@@ -1,159 +1,144 @@
-import io
+import os
 import json
 import uuid
 import zipfile
-import struct
-import zlib
-
+import shutil
 import nbtlib
 
-# ---------- Генератор однопиксельного PNG (без Pillow) ----------
-def _create_png_1x1(r: int, g: int, b: int, a: int) -> bytes:
-    def chunk(chunk_type: bytes, data: bytes) -> bytes:
-        crc = struct.pack('>I', zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
-        return struct.pack('>I', len(data)) + chunk_type + data + crc
-
-    sig = b'\x89PNG\r\n\x1a\n'
-    ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 6, 0, 0, 0)  # RGBA
-    ihdr = chunk(b'IHDR', ihdr_data)
-    raw = b'\x00' + struct.pack('BBBB', r, g, b, a)
-    compressed = zlib.compress(raw)
-    idat = chunk(b'IDAT', compressed)
-    iend = chunk(b'IEND', b'')
-    return sig + ihdr + idat + iend
-
-HOLOGRAM_PNG = _create_png_1x1(0, 255, 255, 128)
-ICON_PNG = _create_png_1x1(0, 255, 255, 128)
-
-# ---------- Основная функция ----------
-def generate_mcpack(structure_bytes: bytes) -> bytes:
-    """
-    Принимает байты .mcstructure, возвращает байты готового .mcpack (zip).
-    Постройка визуализируется послойно через позы бронестойки (0–12).
-    """
-    f = io.BytesIO(structure_bytes)
-    root_nbt = nbtlib.load(f)                     # nbtlib.File
-    structure = root_nbt.root["structure"]        # доступ к корневому тегу ""
-    size_raw = structure["size"]
-    size_x, size_y, size_z = int(size_raw[0]), int(size_raw[1]), int(size_raw[2])
-
-    # Палитра
-    palette_tag = structure["palette"]["default"]["block_palette"]
-    # block_indices — список слоёв по Z, каждый слой содержит Y строк, каждая строка — X индексов
-    block_indices = list(structure["block_indices"])  # принудительно в list для удобства
-
-    # Разложим блоки по слоям (ось Y). Всё, что выше 12, сложим в Y=12.
-    layers = {y: [] for y in range(13)}   # 0..12
-    for z in range(size_z):
-        z_slice = list(block_indices[z])   # список по Y
-        for y in range(size_y):
-            y_row = list(z_slice[y])
-            target_y = y if y <= 12 else 12
-            for x in range(size_x):
-                idx = y_row[x]
-                # Получаем имя блока
-                if 0 <= idx < len(palette_tag):
-                    block_name = str(palette_tag[idx]["name"])
-                else:
-                    block_name = "minecraft:air"
-                if block_name != "minecraft:air":
-                    layers[target_y].append((x, y, z))   # сохраняем реальную Y для правильной позиции в кубе
-
-    # Определим максимальную позу – последний непустой слой, но не меньше 0
-    max_pose = 12
-    while max_pose > 0 and not layers[max_pose]:
-        max_pose -= 1
-
-    # ---------- Сборка .mcpack ----------
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # manifest.json
-        header_uuid = str(uuid.uuid4())
-        module_uuid = str(uuid.uuid4())
-        manifest = {
-            "format_version": 2,
-            "header": {
-                "description": "Hologram structure pack",
-                "name": "Structure Hologram",
-                "uuid": header_uuid,
-                "version": [1, 0, 0],
-                "min_engine_version": [1, 20, 0]
-            },
-            "modules": [{
+def create_manifest(pack_name):
+    # Генерация уникальных UUID для манифеста ресурс-пака
+    return {
+        "format_version": 2,
+        "header": {
+            "description": f"HoloPrint Схематика для {pack_name}",
+            "name": f"HoloPrint_{pack_name}",
+            "uuid": str(uuid.uuid4()),
+            "version":,
+            "min_engine_version": [1, 20, 0]
+        },
+        "modules": [
+            {
+                "description": "HoloPrint Ресурс пак",
                 "type": "resources",
-                "uuid": module_uuid,
+                "uuid": str(uuid.uuid4()),
                 "version": [1, 0, 0]
-            }]
-        }
-        zf.writestr("manifest.json", json.dumps(manifest, indent=2))
-        zf.writestr("pack_icon.png", ICON_PNG)
-
-        # Текстура
-        zf.writestr("textures/entity/hologram.png", HOLOGRAM_PNG)
-
-        # Геометрии для поз 0..max_pose
-        for pose in range(max_pose + 1):
-            bones = []
-            for y in range(pose + 1):
-                if not layers[y]:
-                    continue
-                cubes = []
-                for (bx, by, bz) in layers[y]:
-                    cubes.append({
-                        "origin": [bx + 0.5, by + 0.5, bz + 0.5],
-                        "size": [1, 1, 1],
-                        "uv": [0, 0]
-                    })
-                bones.append({
-                    "name": f"layer_{y}",
-                    "pivot": [0, 0, 0],
-                    "cubes": cubes
-                })
-            geo = {
-                "format_version": "1.12.0",
-                "minecraft:geometry": [{
-                    "description": {
-                        "identifier": f"geometry.hologram_pose_{pose}",
-                        "texture_width": 1,
-                        "texture_height": 1
-                    },
-                    "bones": bones
-                }]
             }
-            zf.writestr(f"models/entity/geometry.hologram_pose_{pose}.json", json.dumps(geo, indent=2))
+        ]
+    }
 
-        # Render controller
-        geo_array = [f"geometry.hologram_pose_{i}" for i in range(max_pose + 1)]
-        rc = {
-            "format_version": "1.10.0",
-            "render_controllers": {
-                "controller.render.armor_stand_hologram": {
-                    "arrays": {
-                        "geometries": {
-                            "Array.geos": geo_array
-                        }
-                    },
-                    "geometry": f"Array.geos[math.min(q.pose_index, {max_pose})]",
-                    "materials": [{"*": "entity_alphatest"}],
-                    "textures": ["textures/entity/hologram"]
-                }
-            }
-        }
-        zf.writestr("render_controllers/armor_stand_hologram.render_controllers.json", json.dumps(rc, indent=2))
-
-        # Клиентская сущность, заменяющая стойку для брони
-        client_entity = {
-            "format_version": "1.10.0",
-            "minecraft:client_entity": {
+def build_hologram_geometry(structure_path):
+    # Чтение .mcstructure файла через nbtlib
+    nbt_file = nbtlib.load(structure_path)
+    
+    # Извлечение размеров структуры
+    size = nbt_file.root['size']
+    width, height, depth = int(size[0]), int(size[1]), int(size[2])
+    
+    # Извлечение палитры блоков и индексов блоков
+    # В Bedrock структурах блоки могут лежать в слоях (block_indices)
+    block_indices = nbt_file.root['structure']['block_indices'][0]
+    palette = nbt_file.root['structure']['palette']['default']['block_palette']
+    
+    # Базовая структура геометрии Bedrock модели бронестенда
+    geometry = {
+        "format_version": "1.12.0",
+        "minecraft:geometry": [
+            {
                 "description": {
-                    "identifier": "minecraft:armor_stand",
-                    "materials": {"default": "entity_alphatest"},
-                    "textures": {"default": "textures/entity/hologram"},
-                    "geometry": {"default": "geometry.hologram_pose_0"},
-                    "render_controllers": ["controller.render.armor_stand_hologram"]
-                }
+                    "identifier": "geometry.armor_stand.holoprint",
+                    "texture_width": 64,
+                    "texture_height": 64,
+                    "visible_bounds_width": float(width + 2),
+                    "visible_bounds_height": float(height + 2),
+                    "visible_bounds_offset": [0, float(height)/2, 0]
+                },
+                "bones": []
             }
-        }
-        zf.writestr("entity/armor_stand.entity.json", json.dumps(client_entity, indent=2))
+        ]
+    }
+    
+    # Основная кость-контейнер
+    base_bone = {
+        "name": "root",
+        "pivot":,
+        "cubes": []
+    }
+    geometry["minecraft:geometry"][0]["bones"].append(base_bone)
 
-    return zip_buf.getvalue()
+    # Послойный парсинг по вертикали (ось Y)
+    # Позы Armor Stand в Bedrock (0-12). Разделяем слои блоков по позам.
+    idx = 0
+    for x in range(width):
+        for y in range(height):
+            for z in range(depth):
+                block_idx = int(block_indices[idx])
+                idx += 1
+                
+                if block_idx == -1: # Воздух
+                    continue
+                    
+                block_data = palette[block_idx]
+                block_name = block_data['name']
+                if "air" in block_name:
+                    continue
+                
+                # Каждому слою Y сопоставляем кость, управляемую позами
+                # Поза Armor Stand переключает видимость/положение костей
+                layer_bone_name = f"layer_y_{y}"
+                
+                # Ищем, создана ли уже кость для этого слоя
+                layer_bone = next((b for b in geometry["minecraft:geometry"][0]["bones"] if b["name"] == layer_bone_name), None)
+                if not layer_bone:
+                    # Условия видимости кости привязаны к анимации/позам (через render_controllers)
+                    # Для упрощения создаем кость, которая будет позиционироваться скриптом
+                    layer_bone = {
+                        "name": layer_bone_name,
+                        "parent": "root",
+                        "pivot": [0, float(y)*16, 0],
+                        "cubes": []
+                    }
+                    geometry["minecraft:geometry"][0]["bones"].append(layer_bone)
+                
+                # Добавляем куб блока (в майнкрафт-координатах: 1 блок = 16 единиц текстуры)
+                layer_bone["cubes"].append({
+                    "origin": [float(x)*16, float(y)*16, float(z)*16],
+                    "size":,
+                    "uv": [0, 0] # Статическая заглушка текстуры для голограммы
+                })
+                
+    return geometry
+
+def compile_mcpack(structure_file_path, output_dir, file_id):
+    pack_name = f"holo_{file_id}"
+    work_dir = os.path.join(output_dir, pack_name)
+    os.makedirs(work_dir, exist_ok=True)
+    
+    # 1. Создаем manifest.json
+    manifest = create_manifest(pack_name)
+    with open(os.path.join(work_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=4)
+        
+    # 2. Создаем директорию моделей и генерируем геометрию
+    models_dir = os.path.join(work_dir, "models", "entity")
+    os.makedirs(models_dir, exist_ok=True)
+    
+    try:
+        geometry_data = build_hologram_geometry(structure_file_path)
+        with open(os.path.join(models_dir, "armor_stand.geo.json"), "w", encoding="utf-8") as f:
+            json.dump(geometry_data, f, indent=4)
+    except Exception as e:
+        shutil.rmtree(work_dir)
+        raise RuntimeError(f"Ошибка при парсинге NBT структуры: {e}")
+
+    # 3. Упаковка в .zip и переименование в .mcpack
+    mcpack_path = os.path.join(output_dir, f"{pack_name}.mcpack")
+    with zipfile.ZipFile(mcpack_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(work_dir):
+            for file in files:
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, work_dir)
+                zipf.write(full_path, rel_path)
+                
+    # Очищаем временную рабочую папку
+    shutil.rmtree(work_dir)
+    return mcpack_path
