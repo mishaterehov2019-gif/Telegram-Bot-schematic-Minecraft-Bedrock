@@ -1,285 +1,136 @@
 import os
-import tempfile
-import asyncio
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+import logging
+import shutil
+from aiogram import Bot, Dispatcher, Router, types, F
+from aiogram.filters import Command, CommandStart
+from aiogram.types import Message, FSInputFile
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, CallbackQuery, FSInputFile
-from aiogram.utils.formatting import Text, Bold, Italic, Code
+import database as db
+import parser as mc_parser
 
-from config import BOT_TOKEN, ADMIN_ID, BASE_DIR
-from database import db
-from parser import HoloGenerator
-# Инициализация
-bot = Bot(token=BOT_TOKEN)
+# Настройки
+ADMIN_ID = 123456789  # Замени на свой ID
+BOT_TOKEN = "ВАШ_ТОКЕН_БОТА" # Токен из Variable на Railway
+
+logging.basicConfig(level=logging.INFO)
 storage = MemoryStorage()
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
-generator = get_generator()
+router = Router()
 
-# Состояния FSM
-class Registration(StatesGroup):
-    waiting_for_nickname = State()
+# Состояния FSM для регистрации ника
+class Form(StatesGroup):
+    minecraft_nick = State()
 
-class AdminAdd(StatesGroup):
-    waiting_for_nickname = State()
-    waiting_for_amount = State()
-
-# --- Хендлеры ---
-@dp.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    """Обработчик команды /start"""
+@router.message(CommandStart())
+async def start_cmd(message: Message, state: FSMContext):
     user = await db.get_user(message.from_user.id)
-
     if user:
-        # Пользователь уже зарегистрирован
-        telegram_id, nickname, balance = user
-        await message.answer(
-            f"👋 Привет, {nickname}!\n\n"
-            f"📊 Твой баланс: {balance} генераций\n\n"
-            f"📤 Отправь мне .mcstructure файл для создания голограммы!\n"
-            f"🔄 Команда /setnick [ник] - изменить никнейм"
-        )
+        await message.answer(f"Привет, {user['minecraft_nickname']}! Отправь мне файл .mcstructure чтобы сгенерировать голограмму. Баланс: {user['balance_generations']}")
     else:
-        # Запрашиваем никнейм
-        await state.set_state(Registration.waiting_for_nickname)
-        await message.answer(
-            "🎮 Добро пожаловать!\n\n"
-            "Для начала работы введи свой никнейм в Minecraft Bedrock:\n"
-            "Пример: `Steve` или `Alex_123`",
-            parse_mode="Markdown"
-        )
+        await message.answer("Добро пожаловать! Для начала работы введи свой никнейм в Minecraft:")
+        await state.set_state(Form.minecraft_nick)
 
-@dp.message(Registration.waiting_for_nickname)
+@router.message(Form.minecraft_nick)
 async def process_nickname(message: Message, state: FSMContext):
-    """Обработка ввода никнейма"""
-    nickname = message.text.strip()
-
-    if len(nickname) < 2 or len(nickname) > 16:
-        await message.answer("❌ Ник должен быть от 2 до 16 символов. Попробуй ещё раз:")
+    nick = message.text.strip()
+    if not nick:
+        await message.answer("Никнейм не может быть пустым. Попробуй еще раз.")
+        return
+    
+    # Проверяем, занят ли никнейм в БД
+    existing = await db.get_user_by_nick(nick)
+    if existing:
+        await message.answer("Этот никнейм уже зарегистрирован в системе! Используй /setnick если это ты.")
         return
 
-    # Регистрируем пользователя
-    success = await db.register_user(message.from_user.id, nickname)
+    await db.create_user(message.from_user.id, nick)
+    await state.clear()
+    await message.answer(f"Отлично, {nick}! Ты зарегистрирован. Тебе начислено 3 генерации. Отправляй .mcstructure!")
 
-    if success:
-        await state.clear()
-        await message.answer(
-            f"✅ Отлично, {nickname}! Ты зарегистрирован!\n\n"
-            f"🎁 На балансе: 3 генерации\n\n"
-            f"📤 Отправь мне .mcstructure файл, чтобы создать голограмму!"
-        )
-    else:
-        await message.answer(
-            f"❌ Ник `{nickname}` уже занят! Пожалуйста, выбери другой:",
-            parse_mode="Markdown"
-        )
+@router.message(Command("setnick"))
+async def set_nick_cmd(message: Message, state: FSMContext):
+    await message.answer("Введи свой новый никнейм в Minecraft:")
+    await state.set_state(Form.minecraft_nick)
 
-@dp.message(Command("setnick"))
-async def cmd_setnick(message: Message):
-    """Изменение никнейма"""
-    args = message.text.split(maxsplit=1)
-
-    if len(args) < 2:
-        await message.answer("❌ Использование: `/setnick [новый_ник]`", parse_mode="Markdown")
-        return
-
-    new_nick = args[1].strip()
-
-    if len(new_nick) < 2 or len(new_nick) > 16:
-        await message.answer("❌ Ник должен быть от 2 до 16 символов.")
-        return
-
-    success = await db.update_nickname(message.from_user.id, new_nick)
-
-    if success:
-        await message.answer(f"✅ Никнейм изменён на `{new_nick}`!", parse_mode="Markdown")
-    else:
-        await message.answer(f"❌ Ник `{new_nick}` уже занят! Попробуй другой.")
-
-@dp.message(Command("balance"))
-async def cmd_balance(message: Message):
-    """Проверка баланса"""
-    balance = await db.get_balance(message.from_user.id)
-    user = await db.get_user(message.from_user.id)
-
-    if user:
-        _, nickname, _ = user
-        await message.answer(
-            f"📊 Твой баланс, {nickname}:\n\n"
-            f"💰 {balance} генераций\n\n"
-            f"Каждая конвертация тратит 1 генерацию."
-        )
-    else:
-        await message.answer("❌ Сначала зарегистрируйся через /start")
-
-@dp.message(Command("add"))
-async def cmd_add(message: Message):
-    """Админская команда добавления генераций"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещён. Только для администратора.")
-        return
-
-    args = message.text.split(maxsplit=2)
-
-    if len(args) < 3:
-        await message.answer("❌ Использование: `/add [ник_майнкрафт] [количество]`", parse_mode="Markdown")
-        return
-
-    nickname, amount_str = args[1], args[2]
-
-    try:
-        amount = int(amount_str)
-        if amount <= 0:
-            await message.answer("❌ Количество должно быть положительным числом.")
-            return
-    except ValueError:
-        await message.answer("❌ Количество должно быть числом.")
-        return
-
-    success, result = await db.add_generations(nickname, amount)
-
-    if success:
-        await message.answer(f"✅ {result}")
-
-        # Уведомляем пользователя
-        user = await db.get_user_by_nickname(nickname)
-        if user:
-            telegram_id, _, _ = user
-            try:
-                await bot.send_message(
-                    telegram_id,
-                    f"🎉 Администратор добавил тебе {amount} генераций!\n"
-                    f"Новый баланс: {await db.get_balance(telegram_id)}"
-                )
-            except:
-                pass  # Не отправлено - ничего страшного
-    else:
-        await message.answer(f"❌ {result}")
-
-@dp.message(F.document)
+@router.message(F.document)
 async def handle_file(message: Message):
-    """Обработчик файлов .mcstructure"""
     user = await db.get_user(message.from_user.id)
-
     if not user:
-        await message.answer("❌ Сначала зарегистрируйся через /start")
+        await message.answer("Сначала зарегистрируйся командой /start и укажи свой Minecraft никнейм.")
         return
 
-    telegram_id, nickname, balance = user
-
-    # Проверяем баланс
-    if balance <= 0:
-        await message.answer(
-            "❌ Недостаточно генераций на балансе!\n"
-            f"Баланс: {balance}\n"
-            "Обратитесь к администратору для пополнения."
-        )
+    if user['balance_generations'] <= 0:
+        await message.answer("❌ Недостаточно генераций на балансе. Обратитесь к администратору.")
         return
 
-    # Проверяем расширение файла
-    if not message.document.file_name.endswith('.mcstructure'):
-        await message.answer("❌ Пожалуйста, отправь файл с расширением `.mcstructure`")
+    if not message.document.file_name.endswith(".mcstructure"):
+        await message.answer("Пожалуйста, отправь файл с расширением .mcstructure.")
         return
 
-    # Проверяем размер файла (макс 10MB)
-    if message.document.file_size > 10 * 1024 * 1024:
-        await message.answer("❌ Файл слишком большой (>10MB). Используй структуру поменьше.")
+    # Скачиваем файл
+    file = await bot.get_file(message.document.file_id)
+    file_path = f"/tmp/{message.document.file_name}"
+    await bot.download_file(file.file_path, file_path)
+
+    # Парсим структуру
+    await message.answer("⏳ Начинаю парсинг и генерацию пака...")
+    structure_data = mc_parser.parse_mcstructure(file_path)
+    
+    if not structure_data:
+        await message.answer("❌ Ошибка: Файл .mcstructure поврежден или имеет неверный формат.")
         return
 
-    # Отправляем статус
-    status_msg = await message.answer("⏳ Загрузка и обработка файла...")
+    # Генерируем .mcaddon
+    mcaddon_path = mc_parser.generate_mcaddon(structure_data)
+    
+    if not mcaddon_path:
+        await message.answer("❌ Ошибка при генерации .mcaddon.")
+        return
 
-    try:
-        # Скачиваем файл
-        file = await bot.get_file(message.document.file_id)
-        file_path = await bot.download_file(file.file_path)
+    # Списываем баланс
+    await db.update_user_balance(message.from_user.id, -1)
 
-        # Сохраняем во временный файл
-        with tempfile.NamedTemporaryFile(suffix='.mcstructure', delete=False) as tmp_file:
-            tmp_file.write(file_path.read())
-            tmp_file_path = tmp_file.name
-
-        # Парсим и генерируем голограмму
-        await status_msg.edit_text("🔄 Парсинг структуры...")
-
-        structure_data = generator.parse_mcstructure(tmp_file_path)
-
-        if not structure_data:
-            await status_msg.edit_text("❌ Не удалось прочитать файл. Возможно, он повреждён.")
-            os.unlink(tmp_file_path)
-            return
-
-        # Генерируем пак
-        await status_msg.edit_text("🏗️ Создание голограммы...")
-
-        output_path = os.path.join(os.path.dirname(tmp_file_path), "holo.mcpack")
-        success, msg, block_count = generator.generate_holo_pack(structure_data, output_path)
-
-        if not success:
-            await status_msg.edit_text(f"❌ {msg}")
-            os.unlink(tmp_file_path)
-            return
-
-        # Списываем генерацию
-        await db.use_generation(telegram_id)
-
-        # Отправляем результат
-        await status_msg.edit_text(
-            f"✅ Голограмма готова!\n\n"
-            f"🏷️ {structure_data['name']}\n"
-            f"🧱 Блоков: {block_count}\n"
-            f"📏 Размер: {structure_data['size']['x']}x{structure_data['size']['y']}x{structure_data['size']['z']}\n\n"
-            f"📦 Установи файл в Minecraft Bedrock\n"
-            f"⚙️ В игре введи: `/function spawn_holo`\n\n"
-            f"💰 Осталось генераций: {await db.get_balance(telegram_id)}"
-        )
-
-        # Отправляем файл
-        await bot.send_document(
-            message.chat.id,
-            FSInputFile(output_path),
-            caption=f"📦 Голограмма для {nickname}"
-        )
-
-        # Удаляем временные файлы
-        os.unlink(tmp_file_path)
-        os.unlink(output_path)
-
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Произошла ошибка: {str(e)}")
-        import traceback
-        traceback.print_exc()
-
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    """Команда помощи"""
-    await message.answer(
-        "📖 **Доступные команды:**\n\n"
-        "/start - Начать работу (регистрация)\n"
-        "/setnick [ник] - Изменить никнейм\n"
-        "/balance - Проверить баланс\n"
-        "/help - Эта справка\n\n"
-        "📤 **Как использовать:**\n"
-        "1. Зарегистрируйся через /start\n"
-        "2. Отправь мне .mcstructure файл\n"
-        "3. Получи .mcpack с голограммой\n"
-        "4. Установи в Minecraft и используй /function spawn_holo\n\n"
-        "🔄 **Управление слоями:**\n"
-        "В игре используй предметы для переключения слоёв.",
-        parse_mode="Markdown"
+    # Отправляем файл пользователю
+    input_file = FSInputFile(mcaddon_path, filename="hologram.mcaddon")
+    await message.answer_document(
+        document=input_file,
+        caption=f"✅ Генерация успешна! Размер постройки: {structure_data['size']['x']}x{structure_data['size']['y']}x{structure_data['size']['z']}. Баланс: {user['balance_generations'] - 1}"
     )
 
-# --- Запуск ---
-async def main():
-    """Главная функция запуска"""
-    # Инициализируем БД
-    await db.init_db()
+    # Чистим мусор
+    os.remove(file_path)
+    os.remove(mcaddon_path)
 
-    # Запускаем бота
-    print("🤖 Бот запущен!")
+# --- АДМИН ПАНЕЛЬ ---
+@router.message(Command("add"))
+async def add_generations(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Ты не администратор!")
+        return
+
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("❌ Неверный формат. Используй: /add [ник_майнкрафт] [количество]")
+        return
+
+    nick, amount = args[1], int(args[2])
+    user = await db.get_user_by_nick(nick)
+
+    if not user:
+        await message.answer(f"❌ Пользователь с ником '{nick}' не найден в базе.")
+        return
+
+    await db.update_user_balance_by_nick(nick, amount)
+    await message.answer(f"✅ Успешно добавлено {amount} генераций пользователю {nick}.")
+
+async def main():
+    dp.include_router(router)
+    await db.init_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    import asyncio
     asyncio.run(main())
