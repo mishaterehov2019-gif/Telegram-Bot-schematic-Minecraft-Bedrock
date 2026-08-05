@@ -6,39 +6,47 @@ import shutil
 import nbtlib
 
 def create_manifest(pack_name):
-    # Генерация уникальных UUID для манифеста ресурс-пака с корректными версиями
+    # Используем list() вместо квадратных скобок, чтобы избежать пропадания символов
+    v_head = list()
+    v_head.append(1)
+    v_head.append(0)
+    v_head.append(0)
+    
+    v_engine = list()
+    v_engine.append(1)
+    v_engine.append(14)
+    v_engine.append(0)
+
     return {
         "format_version": 2,
         "header": {
             "description": f"HoloPrint Схематика для {pack_name}",
             "name": f"HoloPrint_{pack_name}",
             "uuid": str(uuid.uuid4()),
-            "version":,
-            "min_engine_version": [1, 20, 0]
+            "version": v_head,
+            "min_engine_version": v_engine
         },
         "modules": [
             {
                 "description": "HoloPrint Ресурс пак",
                 "type": "resources",
                 "uuid": str(uuid.uuid4()),
-                "version": [1, 0, 0]
+                "version": v_head
             }
         ]
     }
 
 def build_hologram_geometry(structure_path):
-    # Чтение .mcstructure файла через nbtlib
     nbt_file = nbtlib.load(structure_path)
     
-    # Извлечение размеров структуры
     size = nbt_file.root['size']
-    width, height, depth = int(size[0]), int(size[1]), int(size[2])
+    width = int(size[0])
+    height = int(size[1])
+    depth = int(size[2])
     
-    # Извлечение палитры блоков и индексов блоков
     block_indices = nbt_file.root['structure']['block_indices'][0]
     palette = nbt_file.root['structure']['palette']['default']['block_palette']
     
-    # Базовая структура геометрии Bedrock модели бронестенда
     geometry = {
         "format_version": "1.12.0",
         "minecraft:geometry": [
@@ -49,22 +57,25 @@ def build_hologram_geometry(structure_path):
                     "texture_height": 64,
                     "visible_bounds_width": float(width + 2),
                     "visible_bounds_height": float(height + 2),
-                    "visible_bounds_offset": [0, float(height)/2, 0]
+                    "visible_bounds_offset": list([0.0, float(height)/2, 0.0])
                 },
-                "bones": []
+                "bones": list()
             }
         ]
     }
     
-    # Основная кость-контейнер
+    piv_root = list()
+    piv_root.append(0.0)
+    piv_root.append(0.0)
+    piv_root.append(0.0)
+    
     base_bone = {
         "name": "root",
-        "pivot":,
-        "cubes": []
+        "pivot": piv_root,
+        "cubes": list()
     }
     geometry["minecraft:geometry"][0]["bones"].append(base_bone)
 
-    # Послойный парсинг по вертикали (ось Y)
     idx = 0
     for x in range(width):
         for y in range(height):
@@ -72,33 +83,49 @@ def build_hologram_geometry(structure_path):
                 block_idx = int(block_indices[idx])
                 idx += 1
                 
-                if block_idx == -1: # Воздух
+                if block_idx == -1:
                     continue
                     
                 block_data = palette[block_idx]
-                block_name = block_data['name']
+                block_name = str(block_data['name'])
                 if "air" in block_name:
                     continue
                 
-                # Имя кости для текущего слоя по высоте Y
                 layer_bone_name = f"layer_y_{y}"
                 
-                # Ищем, создана ли уже кость для этого слоя
                 layer_bone = next((b for b in geometry["minecraft:geometry"][0]["bones"] if b["name"] == layer_bone_name), None)
                 if not layer_bone:
+                    piv_layer = list()
+                    piv_layer.append(0.0)
+                    piv_layer.append(float(y)*16.0)
+                    piv_layer.append(0.0)
+                    
                     layer_bone = {
                         "name": layer_bone_name,
                         "parent": "root",
-                        "pivot": [0, float(y)*16, 0],
-                        "cubes": []
+                        "pivot": piv_layer,
+                        "cubes": list()
                     }
                     geometry["minecraft:geometry"][0]["bones"].append(layer_bone)
                 
-                # Добавляем куб блока (размер 16x16x16 в единицах модели майнкрафта)
+                c_origin = list()
+                c_origin.append(float(x)*16.0)
+                c_origin.append(float(y)*16.0)
+                c_origin.append(float(z)*16.0)
+                
+                c_size = list()
+                c_size.append(16.0)
+                c_size.append(16.0)
+                c_size.append(16.0)
+                
+                c_uv = list()
+                c_uv.append(0.0)
+                c_uv.append(0.0)
+                
                 layer_bone["cubes"].append({
-                    "origin": [float(x)*16, float(y)*16, float(z)*16],
-                    "size":,
-                    "uv": [0, 0] # Базовая развертка
+                    "origin": c_origin,
+                    "size": c_size,
+                    "uv": c_uv
                 })
                 
     return geometry
@@ -108,12 +135,10 @@ def compile_mcpack(structure_file_path, output_dir, file_id):
     work_dir = os.path.join(output_dir, pack_name)
     os.makedirs(work_dir, exist_ok=True)
     
-    # 1. Создаем manifest.json
     manifest = create_manifest(pack_name)
     with open(os.path.join(work_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=4)
         
-    # 2. Создаем директорию моделей и генерируем геометрию
     models_dir = os.path.join(work_dir, "models", "entity")
     os.makedirs(models_dir, exist_ok=True)
     
@@ -126,7 +151,6 @@ def compile_mcpack(structure_file_path, output_dir, file_id):
             shutil.rmtree(work_dir)
         raise RuntimeError(f"Ошибка при парсинге NBT структуры: {e}")
 
-    # 3. Упаковка в .zip и переименование в .mcpack
     mcpack_path = os.path.join(output_dir, f"{pack_name}.mcpack")
     with zipfile.ZipFile(mcpack_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, _, files in os.walk(work_dir):
@@ -135,6 +159,5 @@ def compile_mcpack(structure_file_path, output_dir, file_id):
                 rel_path = os.path.relpath(full_path, work_dir)
                 zipf.write(full_path, rel_path)
                 
-    # Очищаем временную рабочую папку
     shutil.rmtree(work_dir)
     return mcpack_path
