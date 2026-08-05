@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, BufferedInputFile
 from aiogram.filters import Command, CommandObject
 
 import db
@@ -41,13 +41,11 @@ async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     exists = await db.user_exists(user_id)
     if not exists:
-        # Новый пользователь – начинаем регистрацию
         await state.set_state(Registration.waiting_for_nickname)
         await message.answer(
             "Добро пожаловать! Для начала работы введите ваш никнейм в Minecraft."
         )
     else:
-        # Уже зарегистрирован – показываем профиль
         user_data = await db.get_user(user_id)
         nick, balance = user_data
         await message.answer(
@@ -61,7 +59,6 @@ async def process_nickname(message: Message, state: FSMContext):
         await message.answer("Некорректный никнейм. Попробуйте ещё раз.")
         return
     user_id = message.from_user.id
-    # Добавляем в БД со стартовыми 3 генерациями
     await db.add_user(user_id, nick, balance=3)
     await state.clear()
     await message.answer(
@@ -126,7 +123,6 @@ async def cmd_add(message: Message, command: CommandObject):
 @router.message(F.document.file_name.endswith('.mcstructure'))
 async def handle_mcstructure(message: Message):
     user_id = message.from_user.id
-    # Проверка регистрации
     user_data = await db.get_user(user_id)
     if not user_data:
         await message.answer("Сначала зарегистрируйтесь через /start.")
@@ -139,37 +135,29 @@ async def handle_mcstructure(message: Message):
         )
         return
 
-    # Уведомляем о начале обработки
     wait_msg = await message.answer("⏳ Обработка структуры, пожалуйста, подождите...")
 
     try:
-        # Скачиваем файл
         file = await bot.get_file(message.document.file_id)
         file_bytes = await bot.download_file(file.file_path)
         raw_data = file_bytes.read()
 
-        # Парсим структуру
         blocks = parser.parse_mcstructure(raw_data)
         if not blocks:
             raise ValueError("Структура не содержит блоков (возможно, пустая).")
 
-        # Генерируем компоненты пака
         geometry = parser.generate_geometry(blocks)
         animation = parser.generate_animation(blocks)
         entity = parser.generate_entity_definition()
         manifest = parser.generate_manifest()
 
-        # Упаковываем .mcpack
         mcpack_bytes = parser.pack_mcpack(geometry, animation, entity, manifest)
 
         # Списываем 1 генерацию
         await db.update_balance(user_id, -1)
 
-        # Отправляем файл
         original_name = message.document.file_name
         output_name = original_name.replace('.mcstructure', '.mcpack')
-        # Используем InputFile из буфера
-        from aiogram.types import BufferedInputFile
         input_file = BufferedInputFile(mcpack_bytes, filename=output_name)
         await message.answer_document(input_file, caption="Ваш .mcpack готов ✅")
         await wait_msg.delete()
@@ -186,7 +174,7 @@ async def handle_mcstructure(message: Message):
 async def main():
     await db.init_db()
     logger.info("База данных инициализирована")
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
