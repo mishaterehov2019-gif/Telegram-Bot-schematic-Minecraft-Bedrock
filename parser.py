@@ -6,7 +6,7 @@ import shutil
 import nbtlib
 
 def create_manifest(pack_name):
-    # Генерация уникальных UUID для манифеста ресурс-пака
+    # Генерация уникальных UUID для манифеста ресурс-пака с корректными версиями
     return {
         "format_version": 2,
         "header": {
@@ -35,7 +35,6 @@ def build_hologram_geometry(structure_path):
     width, height, depth = int(size[0]), int(size[1]), int(size[2])
     
     # Извлечение палитры блоков и индексов блоков
-    # В Bedrock структурах блоки могут лежать в слоях (block_indices)
     block_indices = nbt_file.root['structure']['block_indices'][0]
     palette = nbt_file.root['structure']['palette']['default']['block_palette']
     
@@ -66,7 +65,6 @@ def build_hologram_geometry(structure_path):
     geometry["minecraft:geometry"][0]["bones"].append(base_bone)
 
     # Послойный парсинг по вертикали (ось Y)
-    # Позы Armor Stand в Bedrock (0-12). Разделяем слои блоков по позам.
     idx = 0
     for x in range(width):
         for y in range(height):
@@ -82,15 +80,12 @@ def build_hologram_geometry(structure_path):
                 if "air" in block_name:
                     continue
                 
-                # Каждому слою Y сопоставляем кость, управляемую позами
-                # Поза Armor Stand переключает видимость/положение костей
+                # Имя кости для текущего слоя по высоте Y
                 layer_bone_name = f"layer_y_{y}"
                 
                 # Ищем, создана ли уже кость для этого слоя
                 layer_bone = next((b for b in geometry["minecraft:geometry"][0]["bones"] if b["name"] == layer_bone_name), None)
                 if not layer_bone:
-                    # Условия видимости кости привязаны к анимации/позам (через render_controllers)
-                    # Для упрощения создаем кость, которая будет позиционироваться скриптом
                     layer_bone = {
                         "name": layer_bone_name,
                         "parent": "root",
@@ -99,11 +94,11 @@ def build_hologram_geometry(structure_path):
                     }
                     geometry["minecraft:geometry"][0]["bones"].append(layer_bone)
                 
-                # Добавляем куб блока (в майнкрафт-координатах: 1 блок = 16 единиц текстуры)
+                # Добавляем куб блока (размер 16x16x16 в единицах модели майнкрафта)
                 layer_bone["cubes"].append({
                     "origin": [float(x)*16, float(y)*16, float(z)*16],
                     "size":,
-                    "uv": [0, 0] # Статическая заглушка текстуры для голограммы
+                    "uv": [0, 0] # Базовая развертка
                 })
                 
     return geometry
@@ -127,7 +122,8 @@ def compile_mcpack(structure_file_path, output_dir, file_id):
         with open(os.path.join(models_dir, "armor_stand.geo.json"), "w", encoding="utf-8") as f:
             json.dump(geometry_data, f, indent=4)
     except Exception as e:
-        shutil.rmtree(work_dir)
+        if os.path.exists(work_dir):
+            shutil.rmtree(work_dir)
         raise RuntimeError(f"Ошибка при парсинге NBT структуры: {e}")
 
     # 3. Упаковка в .zip и переименование в .mcpack
