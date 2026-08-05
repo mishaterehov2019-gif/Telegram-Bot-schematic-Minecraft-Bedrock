@@ -15,7 +15,7 @@ import parser
 
 # Константы
 ADMIN_ID = 123456789  # ← замените на свой Telegram ID
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8987954193:AAEbC9h7SPAmAWlhOjEwrD0xle1t0zLb7eA")
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в переменных окружения")
 
