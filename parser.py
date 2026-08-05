@@ -36,18 +36,24 @@ def create_manifest(pack_name):
     }
 
 def build_hologram_geometry(structure_path):
-    # Обязательно указываем byteorder="little", так как Bedrock использует Little-Endian
+    # Загружаем файл с явным указанием Little Endian (формат Бедрок)
     nbt_file = nbtlib.load(structure_path, byteorder="little")
     
-    # Читаем список из 3-х элементов [X, Y, Z]
-    size_list = nbt_file.root['size']
-    width = int(size_list[0])   # X
-    height = int(size_list[1])  # Y
-    depth = int(size_list[2])   # Z
+    # Исправление чтения размеров: преобразуем элементы NBT-списка в чистый Python-список чисел
+    size_list = [int(x) for x in nbt_file.root['size']]
+    width = size_list[0]   # X
+    height = size_list[1]  # Y
+    depth = size_list[2]   # Z
     
-    # В Bedrock block_indices - это список списков (обычно для двух слоев блоков)
-    # Берем первый (основной) слой блоков
-    block_indices = nbt_file.root['structure']['block_indices'][0]
+    # В Bedrock блок-индексы хранятся в списке слоев 'block_indices'
+    # layer_0 - это обычные блоки, layer_1 - вода/растения внутри блоков. Берем layer_0.
+    all_layers = nbt_file.root['structure']['block_indices']
+    
+    # Преобразуем индексы блоков в плоский Python-список целых чисел
+    # Это решает ошибку "list indices must be integers or slices, not str"
+    block_indices = [int(x) for x in all_layers[0]]
+    
+    # Извлекаем палитру блоков
     palette = nbt_file.root['structure']['palette']['default']['block_palette']
     
     geometry = {
@@ -79,23 +85,26 @@ def build_hologram_geometry(structure_path):
     }
     geometry["minecraft:geometry"]["bones"].append(base_bone)
 
-    # Индексация блоков в Bedrock идет по порядку ZYX
+    # Обходим трехмерную матрицу постройки
     idx = 0
     for x in range(width):
         for y in range(height):
             for z in range(depth):
-                # На всякий случай проверяем границы массива индексов
                 if idx >= len(block_indices):
                     break
                     
-                block_idx = int(block_indices[idx])
+                block_idx = block_indices[idx]
                 idx += 1
                 
+                # Индекс -1 означает отсутствие блока (воздух)
                 if block_idx == -1:
                     continue
                     
+                # Безопасно берем данные блока из палитры по индексу
                 block_data = palette[block_idx]
                 block_name = str(block_data['name'])
+                
+                # Пропускаем воздух
                 if "air" in block_name:
                     continue
                 
